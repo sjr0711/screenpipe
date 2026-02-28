@@ -52,44 +52,56 @@ pub async fn get_or_download_model(model_type: PyannoteModel) -> Result<PathBuf>
         return Ok(path);
     }
 
-    // Need to download — use atomic flag to prevent duplicate downloads
-    if downloading_flag
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        info!("initiating {} model download...", filename);
-        let model_type_clone = model_type;
-        let flag = downloading_flag;
-        tokio::spawn(async move {
-            match download_model(model_type_clone).await {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("error downloading {} model: {}", filename, e);
-                    // Reset flag so a retry is possible
-                    flag.store(false, Ordering::SeqCst);
-                }
+    // Need to download
+    let download_result = {
+        let mut download_channel_guard = download_channel_lock.lock().await;
+        match download_channel_guard.as_ref() {
+            Some(tx) => {
+                // Download already in progress, subscribe and wait
+                info!("waiting for existing {} model download...", filename);
+                let mut rx = tx.subscribe();
+                drop(download_channel_guard); // Release lock while waiting
+                rx.recv().await.map_err(|e| anyhow::anyhow!("download channel error: {}", e))?
             }
-        });
-    }
+            None => {
+                // Start new download
+                info!("initiating {} model download...", filename);
+                let (tx, rx) = tokio::sync::broadcast::channel(1);
+                *download_channel_guard = Some(tx.clone());
+                drop(download_channel_guard); // Release lock before spawning and waiting
 
-    // Wait for the file to appear, with a timeout
-    let timeout = tokio::time::Duration::from_secs(120);
-    let start = tokio::time::Instant::now();
-    while !path.exists() {
-        if start.elapsed() > timeout {
-            downloading_flag.store(false, Ordering::SeqCst);
-            return Err(anyhow::anyhow!(
-                "timed out waiting for {} model download after {:?}",
-                filename,
-                timeout
-            ));
+                let model_type_clone = model_type;
+                tokio::spawn(async move {
+                    let res = download_model(model_type_clone).await;
+                    if let Err(e) = &res {
+                        warn!("error downloading {} model: {}", filename, e);
+                    }
+                    // Send the result to all listeners
+                    let _ = tx.send(res);
+                });
+
+                rx.recv().await.map_err(|e| anyhow::anyhow!("download channel error: {}", e))?
+            }
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
+    };
 
-    let mut cached = model_path_lock.lock().await;
-    *cached = Some(path.clone());
-    Ok(path)
+    download_result?;
+
+    // After download, re-check disk cache (should exist now)
+    if path.exists() {
+        debug!("{} model successfully downloaded and found at: {:?}", filename, path);
+        let mut cached = model_path_lock.lock().await;
+        *cached = Some(path.clone());
+        
+        // Clear the download channel sender so new downloads can be initiated later if needed
+        let mut download_channel_guard = download_channel_lock.lock().await;
+        *download_channel_guard = None;
+
+        return Ok(path);
+    } else {
+        // This case indicates a logic error or a very peculiar file system issue
+        return Err(anyhow::anyhow!("download completed but {} model file not found at {:?}", filename, path));
+    }
 }
 
 pub enum PyannoteModel {
