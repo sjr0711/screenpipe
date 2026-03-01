@@ -14,10 +14,14 @@ lazy_static! {
         // Contact info
         (Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").unwrap(), "EMAIL"),
 
-        // Phone numbers - various formats:
-        // +1-234-567-8901, (234) 567-8901, 234-567-8901, 234.567.8901, 2345678901
+        // Phone numbers - various formats (requires separators for 7+ digits):
+        // +1-234-567-8901, (234) 567-8901, 234-567-8901, 234.567.8901
+        // Does NOT match raw digit sequences like 2345678901 (considered IDs)
         // Area code must start with 2-9, but exchange is lenient for PII detection
-        (Regex::new(r"(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}").unwrap(), "PHONE"),
+        // Phone numbers starting with optional country code or parentheses.
+        (Regex::new(r"(?:\+\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?:\b|$)").unwrap(), "PHONE"),
+        // Phone numbers starting with a digit and word-bounded.
+        (Regex::new(r"\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b").unwrap(), "PHONE"),
 
         // IP addresses (IPv4)
         (Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap(), "IP_ADDRESS"),
@@ -462,7 +466,10 @@ mod tests {
         assert!(contains_pii("Phone: (234) 567-8901"));
         assert!(contains_pii("Cell: 234.567.8901"));
         assert!(contains_pii("+1-234-567-8901"));
-        assert!(contains_pii("2345678901"));
+
+        // Should NOT match raw digit sequences (like database IDs)
+        assert!(!contains_pii("2345678901"));
+        assert!(!contains_pii("LinkedAccountId: 215805592"));
 
         // Should NOT match short numbers
         assert!(!contains_pii("Room 1234"));
@@ -1025,7 +1032,7 @@ mod tests {
         assert!(contains_pii(
             "123456789:ABCdefGHIjklMNOpqrsTUVwxyz123456789"
         ));
-        assert!(contains_pii("9876543210:abcdefghijklmnopqrstuvwxyz12345"));
+        assert!(contains_pii("9876543210:abcdefghijklmnopqrstuvwxyz123456789"));
     }
 
     #[test]
