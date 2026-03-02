@@ -8,8 +8,8 @@
 //! and broadcasts changes via a `tokio::sync::watch` channel. Subsystems hold
 //! a `watch::Receiver<PowerProfile>` and check it at natural decision points.
 
-use crate::power_monitor::{poll_power_state, PowerState, POLL_INTERVAL};
-use crate::power_profile::{PowerMode, PowerProfile, ProfileName};
+use super::monitor::{poll_power_state, PowerState, POLL_INTERVAL};
+use super::profile::{PowerMode, PowerProfile, ProfileName};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};

@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::event_driven_capture::{CaptureTrigger, TriggerSender};
 use crate::hot_frame_cache::HotFrameCache;
-use crate::power_profile::PowerProfile;
+use crate::power::PowerProfile;
 
 /// Configuration for VisionManager
 #[derive(Clone)]

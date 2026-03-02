@@ -12,8 +12,7 @@ use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::power_manager::{PowerManagerHandle, PowerStatus};
-use crate::power_profile::PowerMode;
+use crate::power::{PowerManagerHandle, PowerMode, PowerStatus};
 
 /// GET /power — return current power status.
 pub async fn get_power_status(

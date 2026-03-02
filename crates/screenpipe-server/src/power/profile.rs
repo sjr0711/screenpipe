@@ -7,7 +7,7 @@
 //! Each profile controls vision capture intervals, audio processing, and
 //! video encoding to trade off quality vs battery drain.
 
-use crate::power_monitor::{PowerState, ThermalState};
+use super::monitor::{PowerState, ThermalState};
 use serde::{Deserialize, Serialize};
 
 /// User's power mode preference.

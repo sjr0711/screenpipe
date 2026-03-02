@@ -136,7 +136,7 @@ pub struct SCServer {
     /// Shared hot frame cache — set this before starting the server so AppState uses it.
     pub hot_frame_cache: Option<Arc<HotFrameCache>>,
     /// Power manager handle — set this before starting to enable /power endpoints.
-    pub power_manager: Option<Arc<crate::power_manager::PowerManagerHandle>>,
+    pub power_manager: Option<Arc<crate::power::PowerManagerHandle>>,
 }
 
 impl SCServer {

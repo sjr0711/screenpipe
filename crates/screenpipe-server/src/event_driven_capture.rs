@@ -10,7 +10,7 @@
 
 use crate::hot_frame_cache::{HotFrame, HotFrameCache};
 use crate::paired_capture::{paired_capture, CaptureContext, PairedCaptureResult};
-use crate::power_profile::PowerProfile;
+use crate::power::PowerProfile;
 use anyhow::Result;
 use chrono::Utc;
 use screenpipe_accessibility::tree::TreeWalkerConfig;
