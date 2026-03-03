@@ -180,7 +180,7 @@ const DEFAULT_IGNORED_WINDOWS_PER_OS: Record<string, string[]> = {
 };
 
 // Default Pi agent preset — local coding agent with screenpipe search skill
-const DEFAULT_PI_PRESET: AIPreset = {
+export const DEFAULT_PI_PRESET: AIPreset = {
 	id: "pi-agent",
 	provider: "pi",
 	url: "",
@@ -324,7 +324,7 @@ export const getStore = async () => {
 };
 
 // Store utilities similar to Cap's implementation
-function createSettingsStore() {
+export function createSettingsStore() {
 	const get = async (): Promise<Settings> => {
 		const store = await getStore();
 		const settings = await store.get<Settings>("settings");
@@ -345,16 +345,22 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// Migration: Add Pi agent preset for existing users and make it default
-		const hasPiPreset = settings.aiPresets?.some(
-			(p: any) => p.id === "pi-agent" || p.provider === "pi"
-		);
-		if (settings.aiPresets && settings.aiPresets.length > 0 && !hasPiPreset) {
-			// Demote all existing presets from default
-			settings.aiPresets = settings.aiPresets.map((p: any) => ({ ...p, defaultPreset: false }));
-			// Add Pi as default at the front
-			settings.aiPresets = [DEFAULT_PI_PRESET as any, ...settings.aiPresets];
-			needsUpdate = true;
+		// Migration: Ensure a default preset always exists.
+		// If the user has explicitly deleted the default Pi preset but has other custom presets,
+		// we respect their choice and do not re-add it.
+		else if (settings.aiPresets && settings.aiPresets.length > 0) {
+			const hasDefault = settings.aiPresets.some((p: any) => p.defaultPreset);
+			if (!hasDefault) {
+				const piPreset = settings.aiPresets.find((p: any) => p.id === "pi-agent" || p.provider === "pi");
+				if (piPreset) {
+					(piPreset as any).defaultPreset = true;
+				} else {
+					// If Pi preset doesn't exist (user deleted it) and no other preset is default,
+					// make the first available preset default.
+					settings.aiPresets[0].defaultPreset = true;
+				}
+				needsUpdate = true;
+			}
 		}
 
 		// Migration: Remove screenpipe-cloud presets (replaced by Pi agent)
