@@ -31,6 +31,18 @@ fn split_compound(text: &str) -> String {
     result.into_owned()
 }
 
+/// Sanitize a specific column value for FTS5 filtering.
+///
+/// Unlike `sanitize_fts5_query` which splits by whitespace, this treats the entire
+/// input as a single phrase/token and escapes it properly for exact/phrase matching.
+///
+/// Use this for `app_name:value` type filters.
+pub fn sanitize_column_value(value: &str) -> String {
+    // Escape internal double quotes by doubling them
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{}\"", escaped)
+}
+
 /// Sanitize a query string for safe use in FTS5 MATCH expressions.
 ///
 /// Wraps each whitespace-delimited token in double quotes so that
