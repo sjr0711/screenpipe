@@ -510,18 +510,13 @@ interface IntegrationField {
   help_url: string;
 }
 
-interface IntegrationAction {
-  id: string;
-  description: string;
-}
-
 interface IntegrationInfo {
   id: string;
   name: string;
   icon: string;
   category: string;
+  description: string;
   fields: IntegrationField[];
-  actions: IntegrationAction[];
   connected: boolean;
 }
 
@@ -530,7 +525,6 @@ const INTEGRATION_ICONS: Record<string, string> = {
   slack: "https://upload.wikimedia.org/wikipedia/commons/d/d5/Slack_icon_2019.svg",
   discord: "https://assets-global.website-files.com/6257adef93867e50d84d30e2/636e0a69f118df70ad7828d4_icon_clyde_blurple_RGB.svg",
   email: "",
-  webhook: "",
   todoist: "https://upload.wikimedia.org/wikipedia/commons/2/2e/Todoist_logo.svg",
   teams: "https://upload.wikimedia.org/wikipedia/commons/c/c9/Microsoft_Office_Teams_%282018%E2%80%93present%29.svg",
 };
@@ -615,7 +609,7 @@ function PipeIntegrationCard({ integration, onRefresh }: {
               )}
             </div>
             <p className="text-xs text-muted-foreground mb-3">
-              {integration.actions.map(a => a.description).join(". ")}
+              {integration.description}
             </p>
 
             {!editing ? (
