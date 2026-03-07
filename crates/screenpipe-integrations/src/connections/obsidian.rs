@@ -118,10 +118,15 @@ fn create_note(params: &Map<String, Value>, creds: &Map<String, Value>) -> Resul
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let vault = std::path::Path::new(vault_path);
     let dir = if folder.is_empty() {
-        std::path::PathBuf::from(vault_path)
+        vault.to_path_buf()
     } else {
-        std::path::Path::new(vault_path).join(folder)
+        // Reject path components that could escape the vault
+        if folder.contains("..") {
+            anyhow::bail!("folder must not contain '..': {}", folder);
+        }
+        vault.join(folder)
     };
 
     std::fs::create_dir_all(&dir)?;
