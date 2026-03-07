@@ -22,13 +22,13 @@ russh-sftp = "2.1"
 dirs = "6"
 async-trait = "0.1"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+chrono = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 eventkit-rs = { version = "0.1", features = ["reminders"] }
 objc2 = "0.6"
 objc2-event-kit = "0.3"
 objc2-foundation = "0.3"
-chrono = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -36,4 +36,3 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Foundation_Collections",
 ] }
-chrono = "0.4"

@@ -10,8 +10,12 @@
 
 pub mod discord;
 pub mod email;
+pub mod obsidian;
 pub mod slack;
+pub mod teams;
 pub mod telegram;
+pub mod todoist;
+pub mod webhook;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -100,6 +104,10 @@ pub fn all_integrations() -> Vec<Box<dyn Integration>> {
         Box::new(slack::Slack),
         Box::new(discord::Discord),
         Box::new(email::Email),
+        Box::new(webhook::Webhook),
+        Box::new(obsidian::Obsidian),
+        Box::new(todoist::Todoist),
+        Box::new(teams::Teams),
     ]
 }
 

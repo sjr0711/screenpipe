@@ -530,6 +530,10 @@ const INTEGRATION_ICONS: Record<string, string> = {
   slack: "https://upload.wikimedia.org/wikipedia/commons/d/d5/Slack_icon_2019.svg",
   discord: "https://assets-global.website-files.com/6257adef93867e50d84d30e2/636e0a69f118df70ad7828d4_icon_clyde_blurple_RGB.svg",
   email: "",
+  webhook: "",
+  obsidian: "https://upload.wikimedia.org/wikipedia/commons/1/10/2023_Obsidian_logo.svg",
+  todoist: "https://upload.wikimedia.org/wikipedia/commons/2/2e/Todoist_logo.svg",
+  teams: "https://upload.wikimedia.org/wikipedia/commons/c/c9/Microsoft_Office_Teams_%282018%E2%80%93present%29.svg",
 };
 
 function IntegrationIcon({ icon }: { icon: string }) {
