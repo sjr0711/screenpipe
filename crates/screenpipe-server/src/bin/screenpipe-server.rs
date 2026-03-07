@@ -26,7 +26,7 @@ use screenpipe_server::{
     analytics,
     cli::{
         get_or_create_machine_id, AudioCommand, Cli, CliAudioTranscriptionEngine, Command,
-        McpCommand, OutputFormat, RecordArgs, SyncCommand, VisionCommand,
+        McpCommand, OutputFormat, SyncCommand, VisionCommand,
     },
     cli_pipe::handle_pipe_command,
     cli_status::handle_status_command,
@@ -154,7 +154,7 @@ fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
     Ok(base_dir)
 }
 
-fn setup_logging(local_data_dir: &PathBuf, cli: &Cli) -> anyhow::Result<WorkerGuard> {
+fn setup_logging(local_data_dir: &PathBuf, debug: bool, disable_telemetry: bool) -> anyhow::Result<WorkerGuard> {
     let file_appender = screenpipe_server::logging::SizedRollingWriter::builder()
         .directory(local_data_dir)
         .prefix("screenpipe")
@@ -199,7 +199,7 @@ fn setup_logging(local_data_dir: &PathBuf, cli: &Cli) -> anyhow::Result<WorkerGu
                 }
             });
 
-        if cli.debug {
+        if debug {
             filter.add_directive("screenpipe=debug".parse().unwrap())
         } else {
             filter
@@ -236,7 +236,7 @@ fn setup_logging(local_data_dir: &PathBuf, cli: &Cli) -> anyhow::Result<WorkerGu
     );
 
     // Build the final registry with conditional Sentry layer
-    if !cli.disable_telemetry {
+    if !disable_telemetry {
         tracing_registry
             .with(sentry::integrations::tracing::layer())
             .init();
@@ -254,10 +254,106 @@ async fn main() -> anyhow::Result<()> {
     set_fd_limit();
 
     debug!("starting screenpipe server");
-    let mut cli = Cli::parse();
+    let cli = Cli::parse();
+
+    // Dispatch non-recording subcommands early (they don't need Sentry, DB, etc.)
+    match cli.command {
+        Command::Status {
+            json,
+            ref data_dir,
+            port,
+        } => {
+            let local_data_dir = get_base_dir(data_dir)?;
+            let _log_guard = Some(setup_logging(&local_data_dir, false, true)?);
+            handle_status_command(json, data_dir, port).await?;
+            return Ok(());
+        }
+        Command::Pipe { ref subcommand } => {
+            handle_pipe_command(subcommand).await?;
+            return Ok(());
+        }
+        Command::Audio { ref subcommand } => match subcommand {
+            AudioCommand::List { output } => {
+                let default_input = default_input_device().unwrap();
+                let default_output = default_output_device().await.unwrap();
+                let devices = list_audio_devices().await?;
+                match output {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "data": devices.iter().map(|d| {
+                                json!({
+                                    "name": d.to_string(),
+                                    "is_default": d.name == default_input.name || d.name == default_output.name
+                                })
+                            }).collect::<Vec<_>>(),
+                            "success": true
+                        }))?
+                    ),
+                    OutputFormat::Text => {
+                        println!("available audio devices:");
+                        for device in devices.iter() {
+                            println!("  {}", device);
+                        }
+                        #[cfg(target_os = "macos")]
+                        println!("note: on macos, output devices are your displays");
+                    }
+                }
+                return Ok(());
+            }
+        },
+        Command::Vision { ref subcommand } => match subcommand {
+            VisionCommand::List { output } => {
+                let monitors = list_monitors().await;
+                match output {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "data": monitors.iter().map(|m| {
+                                json!({
+                                    "id": m.id(),
+                                    "name": m.name(),
+                                    "width": m.width(),
+                                    "height": m.height(),
+                                    "is_default": m.is_primary(),
+                                })
+                            }).collect::<Vec<_>>(),
+                            "success": true
+                        }))?
+                    ),
+                    OutputFormat::Text => {
+                        println!("available monitors:");
+                        for monitor in monitors.iter() {
+                            println!("  {}. {:?}", monitor.id(), monitor.name());
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        },
+        Command::Mcp { ref subcommand } => {
+            // Need data_dir for MCP, use default
+            let local_data_dir = get_base_dir(&None)?;
+            handle_mcp_command(subcommand, &local_data_dir).await?;
+            return Ok(());
+        }
+        Command::Sync { ref subcommand } => {
+            handle_sync_command(subcommand).await?;
+            return Ok(());
+        }
+        Command::Record(_) => {
+            // Fall through to recording logic below
+        }
+    }
+
+    // Extract RecordArgs — we know it's Command::Record at this point
+    let record_args = match cli.command {
+        Command::Record(args) => args,
+        _ => unreachable!(),
+    };
 
     // Initialize Sentry only if telemetry is enabled
-    let _sentry_guard = if !cli.disable_telemetry {
+    let _sentry_guard = if !record_args.disable_telemetry {
         let sentry_release_name_append = env::var("SENTRY_RELEASE_NAME_APPEND").unwrap_or_default();
         let release_name = format!(
             "{}{}",
@@ -308,49 +404,49 @@ async fn main() -> anyhow::Result<()> {
                     let mut map = std::collections::BTreeMap::new();
                     map.insert(
                         "audio_chunk_duration".into(),
-                        json!(cli.audio_chunk_duration),
+                        json!(record_args.audio_chunk_duration),
                     );
-                    map.insert("port".into(), json!(cli.port));
-                    map.insert("disable_audio".into(), json!(cli.disable_audio));
+                    map.insert("port".into(), json!(record_args.port));
+                    map.insert("disable_audio".into(), json!(record_args.disable_audio));
                     map.insert(
                         "audio_transcription_engine".into(),
-                        json!(format!("{:?}", cli.audio_transcription_engine)),
+                        json!(format!("{:?}", record_args.audio_transcription_engine)),
                     );
-                    map.insert("monitor_ids".into(), json!(cli.monitor_id));
-                    map.insert("use_all_monitors".into(), json!(cli.use_all_monitors));
+                    map.insert("monitor_ids".into(), json!(record_args.monitor_id));
+                    map.insert("use_all_monitors".into(), json!(record_args.use_all_monitors));
                     map.insert(
                         "languages".into(),
-                        json!(cli
+                        json!(record_args
                             .language
                             .iter()
                             .map(|l| format!("{:?}", l))
                             .collect::<Vec<_>>()),
                     );
-                    map.insert("use_pii_removal".into(), json!(cli.use_pii_removal));
-                    map.insert("disable_vision".into(), json!(cli.disable_vision));
-                    map.insert("vad_engine".into(), json!(format!("{:?}", cli.vad_engine)));
+                    map.insert("use_pii_removal".into(), json!(record_args.use_pii_removal));
+                    map.insert("disable_vision".into(), json!(record_args.disable_vision));
+                    map.insert("vad_engine".into(), json!(format!("{:?}", record_args.vad_engine)));
                     map.insert(
                         "enable_input_capture".into(),
-                        json!(cli.enable_input_capture),
+                        json!(record_args.enable_input_capture),
                     );
                     map.insert(
                         "enable_accessibility".into(),
-                        json!(cli.enable_accessibility),
+                        json!(record_args.enable_accessibility),
                     );
-                    map.insert("enable_sync".into(), json!(cli.enable_sync));
-                    map.insert("sync_interval_secs".into(), json!(cli.sync_interval_secs));
-                    map.insert("debug".into(), json!(cli.debug));
+                    map.insert("enable_sync".into(), json!(record_args.enable_sync));
+                    map.insert("sync_interval_secs".into(), json!(record_args.sync_interval_secs));
+                    map.insert("debug".into(), json!(record_args.debug));
                     // Only send counts for privacy-sensitive lists (not actual values)
-                    map.insert("audio_device_count".into(), json!(cli.audio_device.len()));
+                    map.insert("audio_device_count".into(), json!(record_args.audio_device.len()));
                     map.insert(
                         "ignored_windows_count".into(),
-                        json!(cli.ignored_windows.len()),
+                        json!(record_args.ignored_windows.len()),
                     );
                     map.insert(
                         "included_windows_count".into(),
-                        json!(cli.included_windows.len()),
+                        json!(record_args.included_windows.len()),
                     );
-                    map.insert("ignored_urls_count".into(), json!(cli.ignored_urls.len()));
+                    map.insert("ignored_urls_count".into(), json!(record_args.ignored_urls.len()));
                     map
                 }),
             );
@@ -361,155 +457,14 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let local_data_dir = get_base_dir(&cli.data_dir)?;
+    let local_data_dir = get_base_dir(&record_args.data_dir)?;
     let local_data_dir_clone = local_data_dir.clone();
 
-    // Only set up logging if we're not running a command with JSON output
     // Store the guard in a variable that lives for the entire main function
-    let _log_guard = Some(setup_logging(&local_data_dir, &cli)?);
-
-    // Handle subcommands that return early
-    if let Some(ref command) = cli.command {
-        match command {
-            Command::Record(_) => {
-                // Fall through to recording logic below
-            }
-            Command::Status {
-                json,
-                data_dir,
-                port,
-            } => {
-                handle_status_command(*json, data_dir, *port).await?;
-                return Ok(());
-            }
-            Command::Pipe { subcommand } => {
-                handle_pipe_command(subcommand).await?;
-                return Ok(());
-            }
-            Command::Audio { subcommand } => match subcommand {
-                AudioCommand::List { output } => {
-                    let default_input = default_input_device().unwrap();
-                    let default_output = default_output_device().await.unwrap();
-                    let devices = list_audio_devices().await?;
-                    match output {
-                        OutputFormat::Json => println!(
-                            "{}",
-                            serde_json::to_string_pretty(&json!({
-                                "data": devices.iter().map(|d| {
-                                    json!({
-                                        "name": d.to_string(),
-                                        "is_default": d.name == default_input.name || d.name == default_output.name
-                                    })
-                                }).collect::<Vec<_>>(),
-                                "success": true
-                            }))?
-                        ),
-                        OutputFormat::Text => {
-                            println!("available audio devices:");
-                            for device in devices.iter() {
-                                println!("  {}", device);
-                            }
-                            #[cfg(target_os = "macos")]
-                            println!("note: on macos, output devices are your displays");
-                        }
-                    }
-                    return Ok(());
-                }
-            },
-            Command::Vision { subcommand } => match subcommand {
-                VisionCommand::List { output } => {
-                    let monitors = list_monitors().await;
-                    match output {
-                        OutputFormat::Json => println!(
-                            "{}",
-                            serde_json::to_string_pretty(&json!({
-                                "data": monitors.iter().map(|m| {
-                                    json!({
-                                        "id": m.id(),
-                                        "name": m.name(),
-                                        "width": m.width(),
-                                        "height": m.height(),
-                                        "is_default": m.is_primary(),
-                                    })
-                                }).collect::<Vec<_>>(),
-                                "success": true
-                            }))?
-                        ),
-                        OutputFormat::Text => {
-                            println!("available monitors:");
-                            for monitor in monitors.iter() {
-                                println!("  {}. {:?}", monitor.id(), monitor.name());
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-            },
-            Command::Mcp { subcommand } => {
-                handle_mcp_command(subcommand, &local_data_dir_clone).await?;
-                return Ok(());
-            }
-            Command::Sync { subcommand } => {
-                handle_sync_command(subcommand).await?;
-                return Ok(());
-            }
-        }
-    }
-
-    // If we get here, we're either `screenpipe` (no command) or `screenpipe record`
-    // For bare `screenpipe`, show deprecation hint
-    if cli.command.is_none() {
-        eprintln!(
-            "{}",
-            "hint: use 'screenpipe record' explicitly. bare 'screenpipe' will be removed in a future version."
-                .bright_yellow()
-        );
-    }
-
-    // Build RecordArgs from either the Record subcommand or legacy top-level flags.
-    // Then override cli fields so all downstream code (which uses cli.*) gets the right values.
-    let record_args = match &cli.command {
-        Some(Command::Record(args)) => args.clone(),
-        _ => RecordArgs::from_cli(&cli),
-    };
-
-    // Sync cli fields from record_args (needed when `screenpipe record` is used,
-    // because clap puts those flags on RecordArgs, not on Cli's top-level fields)
-    cli.audio_chunk_duration = record_args.audio_chunk_duration;
-    cli.port = record_args.port;
-    cli.disable_audio = record_args.disable_audio;
-    cli.audio_device = record_args.audio_device.clone();
-    cli.use_system_default_audio = record_args.use_system_default_audio;
-    cli.data_dir = record_args.data_dir.clone();
-    cli.debug = record_args.debug;
-    cli.audio_transcription_engine = record_args.audio_transcription_engine.clone();
-    cli.monitor_id = record_args.monitor_id.clone();
-    cli.use_all_monitors = record_args.use_all_monitors;
-    cli.language = record_args.language.clone();
-    cli.use_pii_removal = record_args.use_pii_removal;
-    cli.disable_vision = record_args.disable_vision;
-    cli.vad_engine = record_args.vad_engine.clone();
-    cli.ignored_windows = record_args.ignored_windows.clone();
-    cli.included_windows = record_args.included_windows.clone();
-    cli.ignored_urls = record_args.ignored_urls.clone();
-    cli.deepgram_api_key = record_args.deepgram_api_key.clone();
-    cli.auto_destruct_pid = record_args.auto_destruct_pid;
-    cli.disable_telemetry = record_args.disable_telemetry;
-    cli.video_quality = record_args.video_quality.clone();
-    cli.enable_input_capture = record_args.enable_input_capture;
-    cli.enable_accessibility = record_args.enable_accessibility;
-    cli.enable_sync = record_args.enable_sync;
-    cli.sync_token = record_args.sync_token.clone();
-    cli.sync_password = record_args.sync_password.clone();
-    cli.sync_interval_secs = record_args.sync_interval_secs;
-    cli.sync_machine_id = record_args.sync_machine_id.clone();
-
-    // Recompute data dir in case record_args overrode it
-    let local_data_dir = get_base_dir(&cli.data_dir)?;
-    let local_data_dir_clone = local_data_dir.clone();
+    let _log_guard = Some(setup_logging(&local_data_dir, record_args.debug, record_args.disable_telemetry)?);
 
     // Build unified RecordingConfig from CLI args
-    let config = record_args.into_recording_config(local_data_dir.clone());
+    let config = record_args.clone().into_recording_config(local_data_dir.clone());
 
     // Replace the current conditional check with:
     let ffmpeg_path = find_ffmpeg_path();
@@ -564,11 +519,11 @@ async fn main() -> anyhow::Result<()> {
 
     let audio_devices_clone = audio_devices.clone();
 
-    let resource_monitor = ResourceMonitor::new(!cli.disable_telemetry);
+    let resource_monitor = ResourceMonitor::new(!record_args.disable_telemetry);
     resource_monitor.start_monitoring(Duration::from_secs(30), Some(Duration::from_secs(60)));
 
     // Initialize analytics for API tracking
-    analytics::init(!cli.disable_telemetry);
+    analytics::init(!record_args.disable_telemetry);
 
     // Check macOS version and send telemetry if below supported versions
     // This helps track users who may have screen capture issues due to old macOS
@@ -591,8 +546,8 @@ async fn main() -> anyhow::Result<()> {
     start_sleep_monitor();
 
     // Start cloud sync service if enabled
-    let sync_service_handle = if cli.enable_sync {
-        match start_sync_service(&cli, db.clone()).await {
+    let sync_service_handle = if record_args.enable_sync {
+        match start_sync_service(&record_args, db.clone()).await {
             Ok(handle) => {
                 info!("cloud sync service started");
                 Some(handle)
@@ -608,7 +563,7 @@ async fn main() -> anyhow::Result<()> {
 
     let db_server = db.clone();
 
-    let warning_audio_transcription_engine_clone = cli.audio_transcription_engine.clone();
+    let warning_audio_transcription_engine_clone = record_args.audio_transcription_engine.clone();
     let monitor_ids: Vec<u32> = if config.monitor_ids.is_empty() {
         all_monitors.iter().map(|m| m.id()).collect::<Vec<_>>()
     } else {
@@ -621,7 +576,7 @@ async fn main() -> anyhow::Result<()> {
 
     let languages = config.languages.clone();
 
-    let vad_engine = cli.vad_engine.clone();
+    let vad_engine = record_args.vad_engine.clone();
     let vad_engine_clone = vad_engine.clone();
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -631,8 +586,8 @@ async fn main() -> anyhow::Result<()> {
     let output_path_clone = Arc::new(local_data_dir.join("data").to_string_lossy().into_owned());
     let shutdown_tx_clone = shutdown_tx.clone();
 
-    let ignored_windows_clone = cli.ignored_windows.clone();
-    let included_windows_clone = cli.included_windows.clone();
+    let ignored_windows_clone = record_args.ignored_windows.clone();
+    let included_windows_clone = record_args.included_windows.clone();
     // Create UI recorder config early before cli is moved
     let ui_recorder_config = config.to_ui_recorder_config();
 
@@ -866,11 +821,11 @@ async fn main() -> anyhow::Result<()> {
     println!("├────────────────────────┼────────────────────────────────────┤");
     println!(
         "│ audio chunk duration   │ {:<34} │",
-        format!("{} seconds", cli.audio_chunk_duration)
+        format!("{} seconds", record_args.audio_chunk_duration)
     );
-    println!("│ port                   │ {:<34} │", cli.port);
-    println!("│ audio disabled         │ {:<34} │", cli.disable_audio);
-    println!("│ vision disabled        │ {:<34} │", cli.disable_vision);
+    println!("│ port                   │ {:<34} │", record_args.port);
+    println!("│ audio disabled         │ {:<34} │", record_args.disable_audio);
+    println!("│ vision disabled        │ {:<34} │", record_args.disable_vision);
     println!(
         "│ audio engine           │ {:<34} │",
         format!("{:?}", warning_audio_transcription_engine_clone)
@@ -883,13 +838,13 @@ async fn main() -> anyhow::Result<()> {
         "│ data directory         │ {:<34} │",
         local_data_dir_clone.display()
     );
-    println!("│ debug mode             │ {:<34} │", cli.debug);
+    println!("│ debug mode             │ {:<34} │", record_args.debug);
     println!(
         "│ telemetry              │ {:<34} │",
-        !cli.disable_telemetry
+        !record_args.disable_telemetry
     );
-    println!("│ use pii removal        │ {:<34} │", cli.use_pii_removal);
-    println!("│ use all monitors       │ {:<34} │", cli.use_all_monitors);
+    println!("│ use pii removal        │ {:<34} │", record_args.use_pii_removal);
+    println!("│ use all monitors       │ {:<34} │", record_args.use_all_monitors);
     println!(
         "│ ignored windows        │ {:<34} │",
         format_cell(&format!("{:?}", &ignored_windows_clone), VALUE_WIDTH)
@@ -900,26 +855,26 @@ async fn main() -> anyhow::Result<()> {
     );
     println!(
         "│ cloud sync             │ {:<34} │",
-        if cli.enable_sync {
+        if record_args.enable_sync {
             "enabled"
         } else {
             "disabled"
         }
     );
-    if cli.enable_sync {
+    if record_args.enable_sync {
         println!(
             "│ sync interval          │ {:<34} │",
-            format!("{} seconds", cli.sync_interval_secs)
+            format!("{} seconds", record_args.sync_interval_secs)
         );
     }
     println!(
         "│ auto-destruct pid      │ {:<34} │",
-        cli.auto_destruct_pid.unwrap_or(0)
+        record_args.auto_destruct_pid.unwrap_or(0)
     );
     // For security reasons, you might want to mask the API key if displayed
     println!(
         "│ deepgram key           │ {:<34} │",
-        if cli.deepgram_api_key.is_some() {
+        if record_args.deepgram_api_key.is_some() {
             "set (masked)"
         } else {
             "not set"
@@ -950,10 +905,10 @@ async fn main() -> anyhow::Result<()> {
     println!("│ languages              │                                    │");
     const MAX_ITEMS_TO_DISPLAY: usize = 5;
 
-    if cli.language.is_empty() {
+    if record_args.language.is_empty() {
         println!("│ {:<22} │ {:<34} │", "", "all languages");
     } else {
-        let total_languages = cli.language.len();
+        let total_languages = record_args.language.len();
         for (_, language) in languages.iter().enumerate().take(MAX_ITEMS_TO_DISPLAY) {
             let language_str = format!("id: {}", language);
             let formatted_language = format_cell(&language_str, VALUE_WIDTH);
@@ -972,7 +927,7 @@ async fn main() -> anyhow::Result<()> {
     println!("├────────────────────────┼────────────────────────────────────┤");
     println!("│ monitors               │                                    │");
 
-    if cli.disable_vision {
+    if record_args.disable_vision {
         println!("│ {:<22} │ {:<34} │", "", "vision disabled");
     } else if monitor_ids.is_empty() {
         println!("│ {:<22} │ {:<34} │", "", "no monitors available");
@@ -996,7 +951,7 @@ async fn main() -> anyhow::Result<()> {
     println!("├────────────────────────┼────────────────────────────────────┤");
     println!("│ audio devices          │                                    │");
 
-    if cli.disable_audio {
+    if record_args.disable_audio {
         println!("│ {:<22} │ {:<34} │", "", "disabled");
     } else if audio_devices_clone.is_empty() {
         println!("│ {:<22} │ {:<34} │", "", "no devices available");
@@ -1038,7 +993,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Add warning for telemetry
-    if !cli.disable_telemetry {
+    if !record_args.disable_telemetry {
         println!(
             "{}",
             "warning: telemetry is enabled. only error-level data will be sent.\n\
@@ -1112,7 +1067,7 @@ async fn main() -> anyhow::Result<()> {
     pin_mut!(server_future);
 
     // Add auto-destruct watcher
-    if let Some(pid) = cli.auto_destruct_pid {
+    if let Some(pid) = record_args.auto_destruct_pid {
         info!("watching pid {} for auto-destruction", pid);
         let shutdown_tx_clone = shutdown_tx.clone();
         tokio::spawn(async move {
@@ -1463,20 +1418,20 @@ fn is_command_available(command: &str) -> bool {
 
 /// Start the cloud sync service
 async fn start_sync_service(
-    cli: &Cli,
+    args: &screenpipe_server::cli::RecordArgs,
     db: Arc<DatabaseManager>,
 ) -> anyhow::Result<Arc<screenpipe_core::sync::SyncServiceHandle>> {
     // Validate required credentials
-    let token = cli.sync_token.as_ref().ok_or_else(|| {
+    let token = args.sync_token.as_ref().ok_or_else(|| {
         anyhow::anyhow!("--sync-token or SCREENPIPE_SYNC_TOKEN required for sync")
     })?;
 
-    let password = cli.sync_password.as_ref().ok_or_else(|| {
+    let password = args.sync_password.as_ref().ok_or_else(|| {
         anyhow::anyhow!("--sync-password or SCREENPIPE_SYNC_PASSWORD required for sync")
     })?;
 
     // Get machine ID
-    let machine_id = get_or_create_machine_id(cli.sync_machine_id.clone());
+    let machine_id = get_or_create_machine_id(args.sync_machine_id.clone());
     info!("sync machine ID: {}", machine_id);
 
     // Get device info
@@ -1504,7 +1459,7 @@ async fn start_sync_service(
     // Create sync service config
     let service_config = SyncServiceConfig {
         enabled: true,
-        sync_interval_secs: cli.sync_interval_secs,
+        sync_interval_secs: args.sync_interval_secs,
         sync_types: vec![BlobType::Ocr, BlobType::Transcripts],
         max_blobs_per_cycle: 10,
         sync_on_startup: true,
