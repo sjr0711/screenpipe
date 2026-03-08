@@ -13,6 +13,7 @@ use crate::store::IcsCalendarEntry;
 use crate::store::IcsCalendarSettingsStore;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use chrono_tz::Tz;
+use futures::stream::{self, StreamExt};
 use icalendar::{Calendar, CalendarDateTime, Component, DatePerhapsTime, EventLike};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -316,11 +317,17 @@ pub async fn start_ics_calendar_poller(app: AppHandle) {
                 .collect();
 
             if !enabled_entries.is_empty() {
-                let mut all_events = Vec::new();
-                for entry in &enabled_entries {
-                    let events = fetch_and_parse_feed(&client, entry).await;
-                    all_events.extend(events);
-                }
+                let all_events: Vec<CalendarEventItem> = stream::iter(enabled_entries)
+                    .map(|entry| {
+                        let client = client.clone();
+                        async move { fetch_and_parse_feed(&client, &entry).await }
+                    })
+                    .buffer_unordered(10)
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .collect();
 
                 if !all_events.is_empty() {
                     if let Err(e) = screenpipe_events::send_event("calendar_events", all_events) {
@@ -383,12 +390,17 @@ pub async fn ics_calendar_get_upcoming(app: AppHandle) -> Result<Vec<CalendarEve
     }
 
     let client = reqwest::Client::new();
-    let mut all_events = Vec::new();
-
-    for entry in &enabled {
-        let events = fetch_and_parse_feed(&client, entry).await;
-        all_events.extend(events);
-    }
+    let mut all_events: Vec<CalendarEventItem> = stream::iter(enabled)
+        .map(|entry| {
+            let client = client.clone();
+            async move { fetch_and_parse_feed(&client, &entry).await }
+        })
+        .buffer_unordered(10)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
 
     // Filter to next 8 hours only
     let now = Utc::now();
@@ -408,4 +420,40 @@ pub async fn ics_calendar_get_upcoming(app: AppHandle) -> Result<Vec<CalendarEve
     all_events.sort_by(|a, b| a.start.cmp(&b.start));
 
     Ok(all_events)
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::stream::{self, StreamExt};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[tokio::test]
+    async fn test_parallel_fetching_logic() {
+        // Mock function that simulates network delay
+        async fn mock_fetch(id: usize) -> Vec<usize> {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            vec![id]
+        }
+
+        let start = Instant::now();
+        let items: Vec<usize> = (0..10).collect();
+        
+        let results: Vec<usize> = stream::iter(items)
+            .map(|id| mock_fetch(id))
+            .buffer_unordered(10) // Limit concurrency to 10
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+            
+        let duration = start.elapsed();
+        
+        // Sequential would be 10 * 200ms = 2000ms.
+        // Parallel should be ~200ms + overhead.
+        println!("Duration: {:?}", duration);
+        assert!(duration < Duration::from_millis(1000), "Should finish in well under 1 second (took {:?})", duration);
+        assert_eq!(results.len(), 10);
+    }
 }
