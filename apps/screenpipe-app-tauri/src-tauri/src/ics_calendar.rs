@@ -13,6 +13,7 @@ use crate::store::IcsCalendarEntry;
 use crate::store::IcsCalendarSettingsStore;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use chrono_tz::Tz;
+use futures::StreamExt;
 use icalendar::{Calendar, CalendarDateTime, Component, DatePerhapsTime, EventLike};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -316,10 +317,23 @@ pub async fn start_ics_calendar_poller(app: AppHandle) {
                 .collect();
 
             if !enabled_entries.is_empty() {
+                let fetches: Vec<Vec<CalendarEventItem>> = futures::stream::iter(enabled_entries.into_iter())
+                    .map(|entry| {
+                        let client = client.clone();
+                        async move { fetch_and_parse_feed(&client, &entry).await }
+                    })
+                    .buffer_unordered(10)
+                    .collect()
+                    .await;
+
                 let mut all_events = Vec::new();
-                for entry in &enabled_entries {
-                    let events = fetch_and_parse_feed(&client, entry).await;
-                    all_events.extend(events);
+                let mut seen_ids = std::collections::HashSet::new();
+                for events in fetches {
+                    for ev in events {
+                        if seen_ids.insert(ev.id.clone()) {
+                            all_events.push(ev);
+                        }
+                    }
                 }
 
                 if !all_events.is_empty() {
@@ -383,11 +397,23 @@ pub async fn ics_calendar_get_upcoming(app: AppHandle) -> Result<Vec<CalendarEve
     }
 
     let client = reqwest::Client::new();
-    let mut all_events = Vec::new();
+    let fetches: Vec<Vec<CalendarEventItem>> = futures::stream::iter(enabled.into_iter())
+        .map(|entry| {
+            let client = client.clone();
+            async move { fetch_and_parse_feed(&client, &entry).await }
+        })
+        .buffer_unordered(10)
+        .collect()
+        .await;
 
-    for entry in &enabled {
-        let events = fetch_and_parse_feed(&client, entry).await;
-        all_events.extend(events);
+    let mut all_events = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for events in fetches {
+        for ev in events {
+            if seen_ids.insert(ev.id.clone()) {
+                all_events.push(ev);
+            }
+        }
     }
 
     // Filter to next 8 hours only
@@ -409,3 +435,85 @@ pub async fn ics_calendar_get_upcoming(app: AppHandle) -> Result<Vec<CalendarEve
 
     Ok(all_events)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    #[tokio::test]
+    async fn test_parse_ics_to_events_in_window() {
+        let now = Utc::now();
+        let start = now + Duration::hours(1);
+        let end = now + Duration::hours(2);
+
+        let ics_data = format!(
+            "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:test-uid-123\r\n\
+            SUMMARY:Future Meeting\r\n\
+            DTSTART:{}\r\n\
+            DTEND:{}\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR",
+            start.format("%Y%m%dT%H%M%SZ"),
+            end.format("%Y%m%dT%H%M%SZ")
+        );
+
+        let events = parse_ics_to_events(&ics_data, "MyFeed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Future Meeting");
+        assert_eq!(events[0].id, "ics-test-uid-123");
+    }
+
+    #[tokio::test]
+    async fn test_ics_deduplication_logic() {
+        // We simulate the stream/dedup logic used in poller
+        // create two mock "fetches" manually
+        let fetches = vec![
+            vec![
+                CalendarEventItem {
+                    id: "ics-1".to_string(),
+                    title: "A".to_string(),
+                    start: "1".to_string(),
+                    end: "2".to_string(),
+                    start_display: "1".to_string(),
+                    end_display: "2".to_string(),
+                    attendees: vec![],
+                    location: None,
+                    calendar_name: "cal".to_string(),
+                    is_all_day: false,
+                },
+            ],
+            vec![
+                CalendarEventItem {
+                    id: "ics-1".to_string(),
+                    title: "A (Duplicate)".to_string(),
+                    start: "1".to_string(),
+                    end: "2".to_string(),
+                    start_display: "1".to_string(),
+                    end_display: "2".to_string(),
+                    attendees: vec![],
+                    location: None,
+                    calendar_name: "cal2".to_string(),
+                    is_all_day: false,
+                },
+            ],
+        ];
+
+        let mut all_events = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        for events in fetches {
+            for ev in events {
+                if seen_ids.insert(ev.id.clone()) {
+                    all_events.push(ev);
+                }
+            }
+        }
+
+        assert_eq!(all_events.len(), 1);
+        assert_eq!(all_events[0].title, "A");
+    }
+}
+
