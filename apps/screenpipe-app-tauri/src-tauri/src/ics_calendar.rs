@@ -14,6 +14,7 @@ use crate::store::IcsCalendarSettingsStore;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use chrono_tz::Tz;
 use icalendar::{Calendar, CalendarDateTime, Component, DatePerhapsTime, EventLike};
+use futures::stream::StreamExt;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -316,11 +317,23 @@ pub async fn start_ics_calendar_poller(app: AppHandle) {
                 .collect();
 
             if !enabled_entries.is_empty() {
+                let fetches = futures::stream::iter(enabled_entries.clone().into_iter())
+                    .map(|entry| {
+                        let client = client.clone();
+                        async move { fetch_and_parse_feed(&client, &entry).await }
+                    })
+                    .buffer_unordered(10)
+                    .collect::<Vec<_>>()
+                    .await;
+
                 let mut all_events = Vec::new();
-                for entry in &enabled_entries {
-                    let events = fetch_and_parse_feed(&client, entry).await;
+                for events in fetches {
                     all_events.extend(events);
                 }
+
+                // Deduplicate by event ID
+                let mut seen = std::collections::HashSet::new();
+                all_events.retain(|e| seen.insert(e.id.clone()));
 
                 if !all_events.is_empty() {
                     if let Err(e) = screenpipe_events::send_event("calendar_events", all_events) {
@@ -383,12 +396,24 @@ pub async fn ics_calendar_get_upcoming(app: AppHandle) -> Result<Vec<CalendarEve
     }
 
     let client = reqwest::Client::new();
-    let mut all_events = Vec::new();
 
-    for entry in &enabled {
-        let events = fetch_and_parse_feed(&client, entry).await;
+    let fetches = futures::stream::iter(enabled.clone().into_iter())
+        .map(|entry| {
+            let client = client.clone();
+            async move { fetch_and_parse_feed(&client, &entry).await }
+        })
+        .buffer_unordered(10)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut all_events = Vec::new();
+    for events in fetches {
         all_events.extend(events);
     }
+
+    // Deduplicate by event ID
+    let mut seen = std::collections::HashSet::new();
+    all_events.retain(|e| seen.insert(e.id.clone()));
 
     // Filter to next 8 hours only
     let now = Utc::now();
@@ -408,4 +433,43 @@ pub async fn ics_calendar_get_upcoming(app: AppHandle) -> Result<Vec<CalendarEve
     all_events.sort_by(|a, b| a.start.cmp(&b.start));
 
     Ok(all_events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Utc, Duration};
+
+    #[test]
+    fn test_parse_and_deduplicate() {
+        let now = Utc::now();
+        let start = now + Duration::hours(1);
+        let end = now + Duration::hours(2);
+
+        let ics_text = format!("BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//hacksw/handcal//NONSGML v1.0//EN
+BEGIN:VEVENT
+UID:19970610T172345Z-AF23B2@example.com
+DTSTAMP:19970610T172345Z
+DTSTART:{}
+DTEND:{}
+SUMMARY:Bastille Day Party
+END:VEVENT
+END:VCALENDAR", start.format("%Y%m%dT%H%M%SZ"), end.format("%Y%m%dT%H%M%SZ"));
+
+        let mut events = parse_ics_to_events(&ics_text, "test1");
+        let events2 = parse_ics_to_events(&ics_text, "test2");
+        
+        // Simulating the extend behavior
+        events.extend(events2);
+
+        assert_eq!(events.len(), 2, "Should have 2 events before deduplication");
+
+        let mut seen = std::collections::HashSet::new();
+        events.retain(|e| seen.insert(e.id.clone()));
+
+        assert_eq!(events.len(), 1, "Should have 1 event after deduplication");
+        assert_eq!(events[0].id, "ics-19970610T172345Z-AF23B2@example.com");
+    }
 }
