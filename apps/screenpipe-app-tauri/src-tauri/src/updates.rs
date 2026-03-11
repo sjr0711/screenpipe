@@ -120,6 +120,39 @@ pub fn is_enterprise_build(_app: &tauri::AppHandle) -> bool {
     cfg!(feature = "enterprise-build")
 }
 
+use std::sync::OnceLock;
+
+fn is_macos_admin() -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+    #[cfg(target_os = "macos")]
+    {
+        static IS_ADMIN: OnceLock<bool> = OnceLock::new();
+        *IS_ADMIN.get_or_init(|| {
+            if let Ok(output) = std::process::Command::new("id").arg("-Gn").output() {
+                if let Ok(groups) = String::from_utf8(output.stdout) {
+                    return groups.split_whitespace().any(|g| g == "admin");
+                }
+            }
+            false
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_macos_admin_does_not_panic() {
+        // Just verify it runs and doesn't crash
+        let is_admin = is_macos_admin();
+        println!("is_admin: {}", is_admin);
+    }
+}
+
 pub struct UpdatesManager {
     interval: Duration,
     update_available: Arc<Mutex<bool>>,
@@ -247,6 +280,37 @@ impl UpdatesManager {
         }
         if let Some(update) = check_result? {
             *self.update_available.lock().await = true;
+
+            if !is_macos_admin() {
+                warn!("skipping auto-update: user is not a macOS admin");
+                let _ = self.app.emit("update-needs-admin", serde_json::json!({
+                    "version": update.version
+                }));
+                
+                if show_dialog {
+                    self.app
+                        .dialog()
+                        .message(format!("update v{} available — ask your admin to install it", update.version))
+                        .title("update needs admin")
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                } else {
+                    let app_notif = self.app.clone();
+                    let version_str = update.version.clone();
+                    std::thread::spawn(move || {
+                        let _ = app_notif
+                            .notification()
+                            .builder()
+                            .title("update available")
+                            .body(format!("v{} is ready — ask your admin to install it", version_str))
+                            .show();
+                    });
+                }
+                if let Some(ref item) = self.update_menu_item {
+                    let _ = item.set_text("update requires admin");
+                }
+                return Ok(true);
+            }
 
             // Emit "update-downloading" immediately so user sees feedback
             let download_info = serde_json::json!({

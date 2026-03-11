@@ -38,6 +38,7 @@ interface UpdateBannerState {
   downloadProgress: DownloadProgress | null;
   pendingUpdate: Update | null;
   authRequired: AuthRequiredInfo | null;
+  needsAdmin: boolean;
   setIsVisible: (visible: boolean) => void;
   setUpdateInfo: (info: UpdateInfo | null) => void;
   setIsInstalling: (installing: boolean) => void;
@@ -45,6 +46,7 @@ interface UpdateBannerState {
   setDownloadProgress: (progress: DownloadProgress | null) => void;
   setPendingUpdate: (update: Update | null) => void;
   setAuthRequired: (info: AuthRequiredInfo | null) => void;
+  setNeedsAdmin: (needsAdmin: boolean) => void;
 }
 
 export const useUpdateBanner = create<UpdateBannerState>((set) => ({
@@ -55,6 +57,7 @@ export const useUpdateBanner = create<UpdateBannerState>((set) => ({
   downloadProgress: null,
   pendingUpdate: null,
   authRequired: null,
+  needsAdmin: false,
   setIsVisible: (visible) => set({ isVisible: visible }),
   setUpdateInfo: (info) => set({ updateInfo: info }),
   setIsInstalling: (installing) => set({ isInstalling: installing }),
@@ -62,6 +65,7 @@ export const useUpdateBanner = create<UpdateBannerState>((set) => ({
   setDownloadProgress: (progress) => set({ downloadProgress: progress }),
   setPendingUpdate: (update) => set({ pendingUpdate: update }),
   setAuthRequired: (info) => set({ authRequired: info }),
+  setNeedsAdmin: (needsAdmin) => set({ needsAdmin }),
 }));
 
 interface UpdateBannerProps {
@@ -71,7 +75,7 @@ interface UpdateBannerProps {
 
 export function UpdateBanner({ className, compact = false }: UpdateBannerProps) {
   const isEnterprise = useIsEnterpriseBuild();
-  const { isVisible, updateInfo, isInstalling, isDownloading, downloadProgress, setIsVisible, setIsInstalling, pendingUpdate, authRequired, setAuthRequired } = useUpdateBanner();
+  const { isVisible, updateInfo, isInstalling, isDownloading, downloadProgress, setIsVisible, setIsInstalling, pendingUpdate, authRequired, setAuthRequired, needsAdmin } = useUpdateBanner();
   const { toast } = useToast();
 
   if (isEnterprise) return null;
@@ -230,6 +234,10 @@ export function UpdateBanner({ className, compact = false }: UpdateBannerProps) 
           <>
             <span>downloading v{updateInfo.version}... {downloadProgress?.percent ?? 0}%</span>
           </>
+        ) : needsAdmin ? (
+          <>
+            <span>v{updateInfo.version} available (ask admin)</span>
+          </>
         ) : (
           <>
             <span>v{updateInfo.version} ready</span>
@@ -266,6 +274,10 @@ export function UpdateBanner({ className, compact = false }: UpdateBannerProps) 
             </div>
             <span className="text-xs text-muted-foreground">{downloadProgress?.percent ?? 0}%</span>
           </div>
+        ) : needsAdmin ? (
+          <span>
+            update <span className="font-medium">v{updateInfo.version}</span> available — ask your admin to install it
+          </span>
         ) : (
           <span>
             screenpipe <span className="font-medium">v{updateInfo.version}</span> is ready
@@ -274,15 +286,17 @@ export function UpdateBanner({ className, compact = false }: UpdateBannerProps) 
       </div>
       {!isDownloading && (
         <div className="flex items-center gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            className="h-7 px-3 text-xs"
-            onClick={handleUpdate}
-            disabled={isInstalling}
-          >
-            {isInstalling ? "restarting..." : "restart to update"}
-          </Button>
+          {!needsAdmin && (
+            <Button
+              variant="default"
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={handleUpdate}
+              disabled={isInstalling}
+            >
+              {isInstalling ? "restarting..." : "restart to update"}
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -299,7 +313,7 @@ export function UpdateBanner({ className, compact = false }: UpdateBannerProps) 
 
 // Hook to listen for update events from Rust
 export function useUpdateListener() {
-  const { setIsVisible, setUpdateInfo, setIsDownloading, setDownloadProgress, setAuthRequired } = useUpdateBanner();
+  const { setIsVisible, setUpdateInfo, setIsDownloading, setDownloadProgress, setAuthRequired, setNeedsAdmin } = useUpdateBanner();
 
   useEffect(() => {
     let unlistenAvailable: (() => void) | undefined;
@@ -307,6 +321,7 @@ export function useUpdateListener() {
     let unlistenDownloading: (() => void) | undefined;
     let unlistenProgress: (() => void) | undefined;
     let unlistenAuth: (() => void) | undefined;
+    let unlistenNeedsAdmin: (() => void) | undefined;
 
     const setupListeners = async () => {
       // Listen for download starting (shows banner immediately)
@@ -326,6 +341,16 @@ export function useUpdateListener() {
         setIsDownloading(false);
         setDownloadProgress(null);
         setUpdateInfo(event.payload);
+        setNeedsAdmin(false);
+        setIsVisible(true);
+      });
+
+      // Listen for needs-admin
+      unlistenNeedsAdmin = await listen<{ version: string }>("update-needs-admin", (event) => {
+        setIsDownloading(false);
+        setDownloadProgress(null);
+        setUpdateInfo({ version: event.payload.version, body: "" });
+        setNeedsAdmin(true);
         setIsVisible(true);
       });
 
@@ -350,6 +375,7 @@ export function useUpdateListener() {
       unlistenDownloading?.();
       unlistenProgress?.();
       unlistenAuth?.();
+      unlistenNeedsAdmin?.();
     };
-  }, [setIsVisible, setUpdateInfo, setIsDownloading, setDownloadProgress, setAuthRequired]);
+  }, [setIsVisible, setUpdateInfo, setIsDownloading, setDownloadProgress, setAuthRequired, setNeedsAdmin]);
 }
