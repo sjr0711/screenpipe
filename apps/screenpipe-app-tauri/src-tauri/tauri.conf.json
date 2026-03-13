@@ -102,12 +102,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "trayIcon": {
-      "id": "screenpipe_main",
-      "iconPath": "assets/screenpipe-logo-tray-white.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": true
-    },
     "security": {
       "assetProtocol": {
         "enable": true,

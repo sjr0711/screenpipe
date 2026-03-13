@@ -2188,10 +2188,8 @@ async fn main() {
             app_handle.manage(update_manager.clone()); // Register for state::<Arc<UpdatesManager>>()
 
             // Setup tray
-            if let Some(_) = app_handle.tray_by_id("screenpipe_main") {
-                if let Err(e) = tray::setup_tray(&app_handle, update_manager.update_now_menu_item_ref()) {
-                    error!("Failed to setup tray: {}", e);
-                }
+            if let Err(e) = tray::setup_tray(&app_handle, update_manager.update_now_menu_item_ref()) {
+                error!("Failed to setup tray: {}", e);
             }
 
             // Log tray icon position for diagnostics.

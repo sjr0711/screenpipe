@@ -69,26 +69,63 @@ pub fn setup_tray(app: &AppHandle, update_item: Option<&tauri::menu::MenuItem<Wr
         *guard = update_item.cloned();
     }
 
-    if let Some(main_tray) = app.tray_by_id("screenpipe_main") {
-        // Initial menu setup with empty state
-        let menu = create_dynamic_menu(app, &MenuState::default(), update_item)?;
-        // Keep a clone alive to prevent use-after-free (see PREVIOUS_TRAY_MENU doc).
-        if let Ok(mut guard) = PREVIOUS_TRAY_MENU.lock() {
-            *guard = Some(menu.clone());
+    let main_tray = if let Some(tray) = app.tray_by_id("screenpipe_main") {
+        tray
+    } else {
+        let app_clone = app.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let icon = match app_clone.path().resolve(
+                "assets/screenpipe-logo-tray-white.png",
+                tauri::path::BaseDirectory::Resource,
+            ) {
+                Ok(path) => tauri::image::Image::from_path(path).ok(),
+                Err(_) => tauri::image::Image::from_path("assets/screenpipe-logo-tray-white.png").ok(),
+            };
+
+            let mut builder = TrayIconBuilder::<Wry>::with_id("screenpipe_main")
+                .icon_as_template(true)
+                .show_menu_on_left_click(!cfg!(target_os = "windows"));
+
+            if let Some(ref i) = icon {
+                if i.width() > 0 && i.height() > 0 {
+                    builder = builder.icon(i.clone());
+                } else {
+                    error!("tray icon has zero dimensions, skipping");
+                }
+            }
+
+            builder.build(&app_clone)
+        }));
+
+        match result {
+            Ok(Ok(tray)) => tray,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_panic_err) => {
+                error!("Tray icon creation panicked (likely missing libappindicator3 on Linux). Disabled.");
+                return Ok(());
+            }
         }
-        main_tray.set_menu(Some(menu))?;
+    };
 
-        // Setup click handlers
-        setup_tray_click_handlers(&main_tray)?;
-
-        // Set autosaveName so macOS remembers position after user Cmd+drags it
-        set_autosave_name(&main_tray);
-
-        // Start menu updater only when we have an update item (not enterprise)
-        if let Some(item) = update_item {
-            setup_tray_menu_updater(app.clone(), item);
-        }
+    // Initial menu setup with empty state
+    let menu = create_dynamic_menu(app, &MenuState::default(), update_item)?;
+    // Keep a clone alive to prevent use-after-free (see PREVIOUS_TRAY_MENU doc).
+    if let Ok(mut guard) = PREVIOUS_TRAY_MENU.lock() {
+        *guard = Some(menu.clone());
     }
+    main_tray.set_menu(Some(menu))?;
+
+    // Setup click handlers
+    setup_tray_click_handlers(&main_tray)?;
+
+    // Set autosaveName so macOS remembers position after user Cmd+drags it
+    set_autosave_name(&main_tray);
+
+    // Start menu updater only when we have an update item (not enterprise)
+    if let Some(item) = update_item {
+        setup_tray_menu_updater(app.clone(), item);
+    }
+
     Ok(())
 }
 
@@ -836,3 +873,4 @@ fn to_accelerator(shortcut: &str) -> String {
         .replace("Control", "Ctrl")
         .replace("CommandOrControl", "CmdOrCtrl")
 }
+
