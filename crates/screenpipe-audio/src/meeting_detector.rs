@@ -1285,8 +1285,8 @@ mod tests {
         let events = vec![CalendarSignal {
             event_id: "early-join".to_string(),
             title: "Sprint Planning".to_string(),
-            start_epoch_ms: now + 10 * 60_000, // starts in 10 min
-            end_epoch_ms: now + 70 * 60_000,   // ends in 70 min
+            start_epoch_ms: now + 4 * 60_000, // starts in 4 min
+            end_epoch_ms: now + 64 * 60_000,   // ends in 64 min
             attendees: vec!["Alice".to_string(), "Bob".to_string()],
             source: "native".to_string(),
         }];
@@ -1297,7 +1297,7 @@ mod tests {
 
         assert!(
             detector.is_in_meeting(),
-            "early join (10 min before start) should be detected via calendar buffer"
+            "early join (4 min before start) should be detected via calendar buffer"
         );
     }
 
