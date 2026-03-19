@@ -70,6 +70,106 @@ const NotificationHandler: React.FC = () => {
   }, []);
 
 
+  // Handle actions from native SwiftUI notification panel (macOS)
+  useEffect(() => {
+    const unlisten = listen<string>("native-notification-action", async (event) => {
+      try {
+        const action = JSON.parse(event.payload);
+        console.log("native notification action:", action);
+
+        if (action.type === "dismiss" || action.type === "auto_dismiss") {
+          return;
+        }
+
+        if (action.type === "manage") {
+          const { emit } = await import("@tauri-apps/api/event");
+          const { invoke } = await import("@tauri-apps/api/core");
+          await emit("navigate", { url: "/home?section=notifications" });
+          try { await invoke("show_window", { window: "home" }); } catch {}
+          return;
+        }
+
+        if (action.type === "mute" && action.pipe_name) {
+          const localforage = (await import("localforage")).default;
+          const raw = await localforage.getItem<string>("screenpipe-settings");
+          const settings = raw ? JSON.parse(raw) : {};
+          const prefs = settings.notificationPrefs || {
+            captureStalls: true, appUpdates: true,
+            pipeSuggestions: true, pipeNotifications: true, mutedPipes: [],
+          };
+          if (!prefs.mutedPipes.includes(action.pipe_name)) {
+            prefs.mutedPipes.push(action.pipe_name);
+          }
+          settings.notificationPrefs = prefs;
+          await localforage.setItem("screenpipe-settings", JSON.stringify(settings));
+          return;
+        }
+
+        // Forward pipe/api/deeplink actions
+        if (action.type === "pipe" && action.pipe) {
+          if (action.open_in_chat) {
+            const contextStr = action.context ? JSON.stringify(action.context, null, 2) : "";
+            await showChatWithPrefill({
+              context: `run pipe "${action.pipe}" with this context:\n${contextStr}`,
+              prompt: `run the ${action.pipe} pipe${action.context ? " with the provided context" : ""}`,
+              autoSend: true,
+              source: `notification-native`,
+            });
+          } else {
+            await fetch(`http://localhost:3030/pipes/${action.pipe}/run`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ notification_context: action.context }),
+            });
+          }
+          return;
+        }
+
+        if (action.type === "api" && action.url) {
+          await fetch(`http://localhost:3030${action.url}`, {
+            method: action.method || "POST",
+            headers: { "Content-Type": "application/json" },
+            body: action.body ? JSON.stringify(action.body) : undefined,
+          });
+          return;
+        }
+
+        if (action.type === "deeplink" && action.url) {
+          if (action.url.startsWith("screenpipe://")) {
+            const { emit } = await import("@tauri-apps/api/event");
+            await emit("deep-link-received", action.url);
+          } else {
+            const { open } = await import("@tauri-apps/plugin-shell");
+            await open(action.url);
+          }
+          return;
+        }
+
+        // Legacy string actions
+        if (action.action === "open_timeline") {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("show_window", { window: "Main" });
+        } else if (action.action === "open_chat") {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("show_window", { window: "Chat" });
+        } else if (action.action === "open_pipe_suggestions") {
+          await showChatWithPrefill({
+            context: PIPE_SUGGESTION_PROMPT,
+            prompt: "what pipes should i create based on my recent activity?",
+            autoSend: true,
+            source: "pipe-suggestion-notification",
+          });
+        }
+      } catch (e) {
+        console.error("failed to handle native notification action:", e);
+      }
+    });
+
+    return () => {
+      unlisten.then((u) => u());
+    };
+  }, []);
+
   // listen for pipe suggestion action from notification panel
   useEffect(() => {
     const unlisten = listen("open-pipe-suggestions", async () => {
