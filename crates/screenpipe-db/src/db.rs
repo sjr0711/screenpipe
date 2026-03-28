@@ -6478,7 +6478,7 @@ LIMIT ? OFFSET ?
         );
 
         let rows: Vec<UiEventRow> = sqlx::query_as(&sql)
-            .bind(query)
+            .bind(crate::text_normalizer::sanitize_fts5_query(query))
             .bind(limit)
             .fetch_all(&self.pool)
             .await?;
